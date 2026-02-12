@@ -17,13 +17,6 @@ export default async function DashboardPage() {
     supabase.from('af_docs').select('id,af_number,created_at').order('created_at', { ascending: false }).limit(5)
   ]);
 
-  const lastRecords = [
-    ...(nfs?.map((item) => ({ type: 'NF', code: item.nf_key, date: item.created_at })) ?? []),
-    ...(afs?.map((item) => ({ type: 'AF', code: item.af_number, date: item.created_at })) ?? [])
-  ]
-    .sort((a, b) => +new Date(b.date) - +new Date(a.date))
-    .slice(0, 5);
-
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
@@ -32,6 +25,7 @@ export default async function DashboardPage() {
           Começar recebimento
         </Link>
       </div>
+
       <section className="grid gap-4 md:grid-cols-2">
         {cards.map((card) => (
           <Link key={card.href} href={card.href}>
@@ -42,20 +36,34 @@ export default async function DashboardPage() {
           </Link>
         ))}
       </section>
-      <Card>
-        <h3 className="mb-3 font-semibold">Últimos 5 registros</h3>
-        <ul className="space-y-2 text-sm">
-          {lastRecords.map((record) => (
-            <li key={`${record.type}-${record.code}`} className="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2">
-              <span>
-                {record.type}: {record.code}
-              </span>
-              <span className="text-slate-500">{formatDate(record.date)}</span>
-            </li>
-          ))}
-          {lastRecords.length === 0 ? <li className="text-slate-500">Nenhum registro ainda.</li> : null}
-        </ul>
-      </Card>
+
+      <section className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <h3 className="mb-3 font-semibold">Últimas 5 NFs</h3>
+          <ul className="space-y-2 text-sm">
+            {nfs?.map((record) => (
+              <li key={record.id} className="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2">
+                <span>{record.nf_key}</span>
+                <span className="text-slate-500">{formatDate(record.created_at)}</span>
+              </li>
+            ))}
+            {!nfs?.length ? <li className="text-slate-500">Nenhuma NF ainda.</li> : null}
+          </ul>
+        </Card>
+
+        <Card>
+          <h3 className="mb-3 font-semibold">Últimas 5 AFs</h3>
+          <ul className="space-y-2 text-sm">
+            {afs?.map((record) => (
+              <li key={record.id} className="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2">
+                <span>{record.af_number}</span>
+                <span className="text-slate-500">{formatDate(record.created_at)}</span>
+              </li>
+            ))}
+            {!afs?.length ? <li className="text-slate-500">Nenhuma AF ainda.</li> : null}
+          </ul>
+        </Card>
+      </section>
     </div>
   );
 }

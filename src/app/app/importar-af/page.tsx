@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, FormEvent, useState } from 'react';
+import { ChangeEvent, FormEvent, useRef, useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { createClient } from '@/lib/supabase/client';
@@ -14,17 +14,26 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.j
 export default function ImportarAFPage() {
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState('');
-  const [sourceType, setSourceType] = useState<'pdf_text' | 'pdf_ocr' | 'photo_ocr'>('pdf_text');
+  const [sourceType, setSourceType] = useState<'pdf_text' | 'pdf_ocr' | 'photo_ocr' | 'manual'>('manual');
   const [extracting, setExtracting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [ocrWarning, setOcrWarning] = useState<string | null>(null);
+  const isCancelledRef = useRef(false);
+
+  const runOcr = async (image: HTMLCanvasElement | File) => {
+    const worker = await createWorker('por');
+    const { data } = await worker.recognize(image);
+    await worker.terminate();
+    return data.text;
+  };
 
   const extractFromPdf = async (f: File) => {
     const data = await f.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data }).promise;
     const page = await pdf.getPage(1);
     const content = await page.getTextContent();
-    const extracted = content.items.map((item: any) => item.str).join(' ');
-    if (extracted.length > 50) {
+    const extracted = content.items.map((item: { str?: string }) => item.str || '').join(' ').trim();
+    if (extracted.length > 80) {
       setSourceType('pdf_text');
       return extracted;
     }
@@ -40,62 +49,78 @@ export default function ImportarAFPage() {
     return ocrText;
   };
 
-  const runOcr = async (image: HTMLCanvasElement | File) => {
-    const worker = await createWorker('por');
-    const { data } = await worker.recognize(image);
-    await worker.terminate();
-    return data.text;
-  };
-
   const onFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0] ?? null;
     setFile(f);
+    setText('');
+    setOcrWarning(null);
     if (!f) return;
 
+    isCancelledRef.current = false;
     setExtracting(true);
+
     try {
+      let extracted = '';
       if (f.type === 'application/pdf') {
-        setText(await extractFromPdf(f));
+        extracted = await extractFromPdf(f);
       } else {
         setSourceType('photo_ocr');
-        setText(await runOcr(f));
+        extracted = await runOcr(f);
+      }
+
+      if (!isCancelledRef.current) {
+        setText(extracted);
+        if (!extracted.trim()) {
+          setOcrWarning('Não conseguimos extrair texto automaticamente. Você pode revisar manualmente antes de salvar.');
+        }
       }
     } catch {
-      toast.error('Falha na extração. Revise manualmente ou tente outro arquivo.');
+      setSourceType('manual');
+      setOcrWarning('Falha na extração (PDF/OCR). Você ainda pode salvar com revisão manual.');
+    } finally {
+      setExtracting(false);
     }
-    setExtracting(false);
   };
 
   const onSave = async (e: FormEvent) => {
     e.preventDefault();
-    if (!file) return;
-    setSaving(true);
-
-    const supabase = createClient();
-    const { data: userData } = await supabase.auth.getUser();
-    const user = userData.user;
-    if (!user) return;
-
-    const path = `${user.id}/af/${Date.now()}-${file.name}`;
-    const upload = await supabase.storage.from('docs').upload(path, file, { upsert: true });
-    if (upload.error) {
-      toast.error(upload.error.message);
-      setSaving(false);
+    if (!file) {
+      toast.error('Selecione um arquivo de AF para continuar.');
       return;
     }
 
     const parsed = parseAFData(text);
-    const fileUrl = supabase.storage.from('docs').getPublicUrl(path).data.publicUrl;
+    if (!parsed.af_number && !text.trim()) {
+      toast.error('Informe pelo menos um identificador da AF ou algum texto revisado.');
+      return;
+    }
+
+    setSaving(true);
+    const supabase = createClient();
+    const { data: userData } = await supabase.auth.getUser();
+    const user = userData.user;
+    if (!user) {
+      setSaving(false);
+      return;
+    }
+
+    const filePath = `${user.id}/af/${Date.now()}-${file.name}`;
+    const upload = await supabase.storage.from('docs').upload(filePath, file, { upsert: true });
+    if (upload.error) {
+      toast.error('Falha no upload do arquivo original da AF.');
+      setSaving(false);
+      return;
+    }
 
     const { data: af, error } = await supabase
       .from('af_docs')
       .insert({
-        af_number: parsed.af_number,
-        supplier_name: parsed.supplier_name,
+        af_number: parsed.af_number || 'NÃO IDENTIFICADO',
+        supplier_name: parsed.supplier_name || 'Fornecedor não identificado',
         unit_code: parsed.unit_code,
         raw_text: text,
         source_type: sourceType,
-        file_url: fileUrl,
+        file_path: filePath,
         created_by: user.id
       })
       .select('id')
@@ -108,13 +133,15 @@ export default function ImportarAFPage() {
     }
 
     if (parsed.items.length) {
-      await supabase.from('af_items').insert(parsed.items.map((it) => ({ ...it, af_id: af.id, created_by: user.id })));
+      const { error: itemError } = await supabase.from('af_items').insert(parsed.items.map((it) => ({ ...it, af_id: af.id, created_by: user.id })));
+      if (itemError) toast.error('AF salva, mas houve erro ao gravar parte dos itens.');
     }
 
     toast.success('AF importada com sucesso.');
     setSaving(false);
     setText('');
     setFile(null);
+    setOcrWarning(null);
   };
 
   return (
@@ -122,7 +149,14 @@ export default function ImportarAFPage() {
       <h2 className="text-2xl font-bold">Importar AF</h2>
       <Card className="space-y-4">
         <input type="file" accept="application/pdf,image/*" onChange={onFile} />
-        {extracting ? <p className="text-sm text-slate-600">Extraindo texto... aguarde.</p> : null}
+        {extracting ? <p className="rounded-lg bg-slate-100 p-3 text-sm text-slate-600">Extraindo texto... este processo pode levar alguns segundos.</p> : null}
+        {extracting ? (
+          <Button variant="secondary" type="button" onClick={() => (isCancelledRef.current = true)}>
+            Cancelar leitura
+          </Button>
+        ) : null}
+        {ocrWarning ? <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{ocrWarning}</p> : null}
+
         <form onSubmit={onSave} className="space-y-3">
           <label className="text-sm font-medium">Revisar texto extraído</label>
           <textarea
@@ -131,7 +165,7 @@ export default function ImportarAFPage() {
             onChange={(e) => setText(e.target.value)}
             placeholder="O texto extraído aparecerá aqui para revisão..."
           />
-          <Button disabled={saving || !text}>{saving ? 'Salvando...' : 'Salvar AF e itens'}</Button>
+          <Button disabled={saving}>{saving ? 'Salvando...' : 'Salvar AF e itens'}</Button>
         </form>
       </Card>
     </div>
